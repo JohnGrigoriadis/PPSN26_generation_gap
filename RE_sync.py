@@ -268,9 +268,16 @@ class Evo():
         # Get all the results
         results = ray.get(task_ids)
 
-        for res, ind in zip(results, for_eval, strict=True):
-            if ind.requires_eval: 
-                ind.fitness = res
+        # error was here, i was giving the wrong fitnesses
+        idx_pop = 0
+        idx_for_eval = 0
+        while idx_pop < len(population) and idx_for_eval < len(for_eval):
+            ind = population[idx_pop]
+            if ind.requires_eval:
+                ind.fitness = results[idx_for_eval]
+                ind.requires_eval = False
+                idx_for_eval += 1
+            idx_pop += 1
 
         eval_end_time = time.time()
         console.rule(f"Generation {self.current_gen}/{config.num_of_generations}")
