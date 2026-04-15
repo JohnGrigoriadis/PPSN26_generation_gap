@@ -162,6 +162,15 @@ class Evo():
         """Tournament Selection"""
         tournament_size: int = 5
 
+        if self.do_we_need_jesus():
+            console.log("Summoning JESUS to prevent stagnation...")
+            jesus = self.jesi(
+                median_age=50, 
+                num_jesi=10, 
+                tournament_size=tournament_size
+            )
+            population.extend(jesus)
+
         # Ensure all individuals have a tags dict and reset parent-selection tag
         for ind in population:
             ind.tags['ps'] = False
@@ -278,7 +287,6 @@ class Evo():
              num_jesi: int,
              tournament_size: int,
             ) -> list[Individual]:
-        
         
         assert tournament_size <= num_jesi, "Tournament size must be <= JESI individuals."
 

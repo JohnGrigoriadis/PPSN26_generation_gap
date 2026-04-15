@@ -56,8 +56,8 @@ install(width=180)
 console = Console()
 print = console.log
 
-POP_SIZE = 50
-NUM_GENERATIONS = 100
+POP_SIZE = 2
+NUM_GENERATIONS = 2
 
 RNG = np.random.default_rng()
 NUM_MODULES = 20
@@ -125,8 +125,6 @@ class Evo():
         torch.save(self.nde.state_dict(), DATA/"NDE.pth")
 
         self.hpd = HighProbabilityDecoder(num_modules=NUM_MODULES)
-
-        self.hm_ids = -1
 
     # Currently Completed
     def gene_to_graph(self, genotype):
@@ -252,7 +250,7 @@ class Evo():
         # them in the eval function
 
         for_eval = [ind for ind in population if ind.requires_eval]
-        robot_graphs = [self.gene_to_graph(ind.genotype) for ind in population]
+        robot_graphs = [self.gene_to_graph(ind.genotype) for ind in for_eval]
         num_inds = len(for_eval)
 
         eval_start_time = time.time()
