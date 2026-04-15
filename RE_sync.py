@@ -200,9 +200,6 @@ class Evo():
             child_j.tags = {"mut": True}
             child_j.requires_eval = True
 
-            child_i.tags["type"] = parent_i.tags["type"]
-            child_j.tags["type"] = parent_j.tags["type"]
-
             population.extend([child_i, child_j])
         return population
 
@@ -246,7 +243,7 @@ class Evo():
             about_to_be_killed_lol.alive = False
 
             pop_len -= 1
-            if pop_len <= self.body_pop_size:
+            if pop_len <= self.pop_size:
                 break
 
         return population
@@ -274,7 +271,7 @@ class Evo():
         results = ray.get(task_ids)
 
         for res, ind in zip(results, population, strict=True):
-            ind.genotype = res
+            ind.fitness = res
 
         eval_end_time = time.time()
         console.rule(f"Generation {self.current_gen}/{config.num_of_generations}")
@@ -319,7 +316,7 @@ def evaluate_pair_worker(
         # made to be adaptabel to different target positions
         return target_pos[0]
 
-    lr_pop_size = 1  
+    lr_pop_size = 5  
     lr_budget = 1  
 
     min_fit = np.inf
