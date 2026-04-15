@@ -56,8 +56,8 @@ install(width=180)
 console = Console()
 print = console.log
 
-POP_SIZE = 10
-NUM_GENERATIONS = 50
+POP_SIZE = 50
+NUM_GENERATIONS = 100
 
 RNG = np.random.default_rng()
 NUM_MODULES = 20
@@ -251,12 +251,14 @@ class Evo():
         # Turn all NDEs into graphs so we don't have to decode 
         # them in the eval function
 
+        for_eval = [ind for ind in population if ind.requires_eval]
         robot_graphs = [self.gene_to_graph(ind.genotype) for ind in population]
+
         eval_start_time = time.time()
 
         # Init parallel tasks
         task_ids = []
-        for robot in robot_graphs:
+        for robot, idx in enumerate(robot_graphs):
             oid = evaluate_pair_worker.remote(
                 robot,
                 self.spawn_position_flat,
@@ -267,8 +269,9 @@ class Evo():
         # Get all the results
         results = ray.get(task_ids)
 
-        for res, ind in zip(results, population, strict=True):
-            ind.fitness = res
+        for res, ind in zip(results, for_eval, strict=True):
+            if ind.requires_eval: 
+                ind.fitness = res
 
         eval_end_time = time.time()
         console.rule(f"Generation {self.current_gen}/{config.num_of_generations}")
@@ -313,8 +316,8 @@ def evaluate_pair_worker(
         # made to be adaptabel to different target positions
         return target_pos[0]
 
-    lr_pop_size = 1 
-    generations = 1
+    lr_pop_size = 10 
+    generations = 10
 
     min_fit = np.inf
 

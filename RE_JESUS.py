@@ -258,6 +258,12 @@ class Evo():
 
         return population
     
+    def do_we_need_jesus(self, mode) -> bool:
+
+        
+
+        return bool()
+
     #? Work in Progress
     def jesi(self,
              median_age: int,
@@ -282,14 +288,12 @@ class Evo():
                     time_birth_low, time_birth_high, 
                     pool_size),
         )
-        print(f"Fetched {len(df)} individuals from database for JESI tournaments.")
 
         # Parse JSON string columns back into Python objects
         for col in ("genotype_", "tags_"):
             df[col] = df[col].apply(lambda v: json.loads(v) if isinstance(v, str) else v)
 
         pool = [Individual.model_validate(row.to_dict()) for _, row in df.iterrows()]
-        print(f"Pool size: {len(pool)}")
 
         # Run num_jesi tournaments, each of size tournament_size; return winners
         winners = []
