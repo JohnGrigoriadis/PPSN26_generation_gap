@@ -56,8 +56,8 @@ install(width=180)
 console = Console()
 print = console.log
 
-POP_SIZE = 2
-NUM_GENERATIONS = 2
+POP_SIZE = 50
+NUM_GENERATIONS = 100
 
 RNG = np.random.default_rng()
 NUM_MODULES = 20
