@@ -52,21 +52,18 @@ from rich.console import Console
 from rich.traceback import install
 
 # Initialize rich console and traceback handler
-install()
+install(width=180)
 console = Console()
 print = console.log
 
-POP_SIZE = 5
-NUM_GENERATIONS = 2
-# BODY_POP_SIZE = 50
-# NUM_GENERATIONS = 100
-# LR_BUDGET_PER_IND = 100
+POP_SIZE = 10
+NUM_GENERATIONS = 50
 
 RNG = np.random.default_rng()
 NUM_MODULES = 20
-GENE_SIZE = 64 # default is 64, change it in the decoder/NDE
+GENE_SIZE = 64 
 
-# Will probably have to fix the paths at some point
+
 CWD = Path.cwd()
 SCRIPT_NAME = __file__.split("/")[-1][:-3]
 DATA = Path(CWD / "__data__" / SCRIPT_NAME)
@@ -148,7 +145,7 @@ class Evo():
         # robot_spec = construct_mjspec_from_graph(robot_graph)
         return robot_graph
     
-    #? Work in progress
+    # Completed
     def parent_selection(self, population: Population) -> Population:
         """Tournament Selection"""
         tournament_size: int = 5
@@ -177,7 +174,7 @@ class Evo():
 
         return population
 
-    #? Work in progress
+    # Completed
     def crossover(self, population: Population) -> Population:
         """One point crossover"""
 
@@ -203,7 +200,7 @@ class Evo():
             population.extend([child_i, child_j])
         return population
 
-    #? Work in progress
+    # Completed
     def mutation(self, population: Population) -> Population:
         """
         Separate mutations for body and hivemind, due to the possibility of different value ranges begin used.
@@ -221,7 +218,7 @@ class Evo():
                 
         return population
 
-    #? Work in progress
+    # Completed
     def survivor_selection(self, population: Population) -> Population:
 
         tournament_size: int = 5
@@ -248,7 +245,7 @@ class Evo():
 
         return population
 
-    #? Work in progress
+    # Completed
     def evaluate_pop(self, population : Population) -> Population:
 
         # Turn all NDEs into graphs so we don't have to decode 
@@ -316,8 +313,8 @@ def evaluate_pair_worker(
         # made to be adaptabel to different target positions
         return target_pos[0]
 
-    lr_pop_size = 5  
-    lr_budget = 1  
+    lr_pop_size = 1 
+    generations = 1
 
     min_fit = np.inf
 
@@ -326,14 +323,14 @@ def evaluate_pair_worker(
 
     local_learner = ng.optimizers.CMA(
         parametrization = num_vars,
-        budget = lr_pop_size * lr_budget,
+        budget = lr_pop_size * generations,
     )
 
     tracker = Tracker(name_to_bind="core", observable_attributes=["xpos"], quiet=True)
     tracker.setup(world.spec, data)
 
     controller = Controller(controller_callback_function=net.forward, tracker=tracker)
-    for _ in range(lr_budget):
+    for _ in range(generations):
         vecs = [local_learner.ask() for _ in range(lr_pop_size)]
 
         for vec_candidate in vecs:
