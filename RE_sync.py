@@ -253,12 +253,13 @@ class Evo():
 
         for_eval = [ind for ind in population if ind.requires_eval]
         robot_graphs = [self.gene_to_graph(ind.genotype) for ind in population]
+        num_inds = len(for_eval)
 
         eval_start_time = time.time()
 
         # Init parallel tasks
         task_ids = []
-        for robot, idx in enumerate(robot_graphs):
+        for robot in robot_graphs:
             oid = evaluate_pair_worker.remote(
                 robot,
                 self.spawn_position_flat,
@@ -277,6 +278,7 @@ class Evo():
         console.rule(f"Generation {self.current_gen}/{config.num_of_generations}")
         print(f"Best Fitness: {np.min(results):.3f}")
         print(f"Mean Fitness: {np.mean(results):.3f}")
+        print(f"Number individuals tested: {num_inds}")
         print(f"Gen {self.current_gen} took {eval_end_time-eval_start_time:.3f} seconds")
         self.current_gen += 1
 

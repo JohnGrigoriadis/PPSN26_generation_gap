@@ -1,5 +1,5 @@
 """
-John, synchronous body-brain evolution.
+John, synchronous body-brain evolution with J.E.S.U.S.(Joint Evolution Strategies with Undead Sampling).
 """
 
 # Imports
@@ -95,9 +95,8 @@ def create_individual(gene_size) -> Individual:
 
         ind = Individual()
         ind.genotype = np.random.normal(loc=0,
-                                        scale=64, # Scale used by Dora 8192
+                                        scale=64, 
                                         size=(3 , gene_size)).tolist()
-
         
         return ind
 
@@ -128,7 +127,7 @@ class Evo():
 
         self.hpd = HighProbabilityDecoder(num_modules=NUM_MODULES)
 
-        self.hm_ids = -1
+        self.fit_history = []
 
         self.conn = sqlite3.connect(DATA)
 
@@ -258,11 +257,20 @@ class Evo():
 
         return population
     
-    def do_we_need_jesus(self, mode) -> bool:
+    def do_we_need_jesus(self, 
+                         window: int = 10, 
+                         threshold: float = 0.2) -> bool:
+        """
+        Returns True if the most recent generation's mean fitness is stagnating
+        relative to the previous window generations.
+        """
+        if len(self.fit_history) < window + 1:
+            return False
 
-        
+        current = self.fit_history[-1]
+        window_mean = np.mean(self.fit_history[-window - 1 : -1])
 
-        return bool()
+        return bool(np.isclose(current, window_mean, rtol=threshold))
 
     #? Work in Progress
     def jesi(self,
@@ -271,12 +279,13 @@ class Evo():
              tournament_size: int,
             ) -> list[Individual]:
         
+        
         assert tournament_size <= num_jesi, "Tournament size must be <= JESI individuals."
 
-        time_death_low = median_age - 5
+        time_death_low = max(0, median_age - 10)
         time_death_high = median_age
 
-        time_birth_low = 10
+        time_birth_low = 0
         time_birth_high = time_death_low - 5
 
         # Fetch a larger pool so tournaments have meaningful competition
@@ -309,12 +318,14 @@ class Evo():
         # Turn all NDEs into graphs so we don't have to decode 
         # them in the eval function
 
+        for_eval = [ind for ind in population if ind.requires_eval]
         robot_graphs = [self.gene_to_graph(ind.genotype) for ind in population]
+
         eval_start_time = time.time()
 
         # Init parallel tasks
         task_ids = []
-        for robot in robot_graphs:
+        for robot, idx in enumerate(robot_graphs):
             oid = evaluate_pair_worker.remote(
                 robot,
                 self.spawn_position_flat,
@@ -324,9 +335,11 @@ class Evo():
 
         # Get all the results
         results = ray.get(task_ids)
+        self.fit_history.append(np.mean(results))
 
-        for res, ind in zip(results, population, strict=True):
-            ind.fitness = res
+        for res, ind in zip(results, for_eval, strict=True):
+            if ind.requires_eval: 
+                ind.fitness = res
 
         eval_end_time = time.time()
         console.rule(f"Generation {self.current_gen}/{config.num_of_generations}")
