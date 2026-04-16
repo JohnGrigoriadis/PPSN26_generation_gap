@@ -320,21 +320,28 @@ def evaluate_pair_worker(
         # made to be adaptabel to different target positions
         return float(np.linalg.norm(np.array(target_pos) - np.array(spawn_pos)))
 
-    lr_budget = 100
+    lr_budget = 200
 
     min_fit = np.inf
 
     net = Network(input_size=input_size, hidden_size=16, output_size=output_size)
     num_vars = sum(p.numel() for p in net.parameters())
 
-    local_learner = ng.optimizers.TwoPointsDE(
-        parametrization = num_vars,
-        budget = lr_budget,
-    )
-    # local_learner = ng.optimizers.CMA(
+    # local_learner = ng.optimizers.TwoPointsDE(
     #     parametrization = num_vars,
     #     budget = lr_budget,
     # )
+
+    # 3. Provide the initial random starting point
+    initial_weights = np.random.uniform(-0.5, 0.5, size=(num_vars,))
+    param = ng.p.Array(init=initial_weights)
+    param.set_mutation(sigma=0.075)
+
+    cma_config = ng.optimizers.ParametrizedCMA(popsize=POP_SIZE)
+    local_learner = cma_config(
+        parametrization=param,
+        budget=lr_budget,
+    )
 
     tracker = Tracker(name_to_bind="core", observable_attributes=["xpos"], quiet=True)
     tracker.setup(world.spec, data)
@@ -357,7 +364,7 @@ def evaluate_pair_worker(
 
         mj.set_mjcb_control(lambda m, d: controller.set_control(m, d, target_position=(xt, yt, zt)))
         # 4. Run Simulation
-        simple_runner(model, data, duration=10)  # type: ignore
+        simple_runner(model, data, duration=5)  # type: ignore
 
         # 5. Calculate Fitness
         xc, yc, zc = data.qpos[0:3].copy()
