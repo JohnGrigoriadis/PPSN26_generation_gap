@@ -300,10 +300,12 @@ class Evo():
         pool_size = num_jesi * tournament_size
 
         df = pd.read_sql_query(
-            self.query, self.conn,
+            self.query,
+            self.conn,
             params=(time_death_low, time_death_high, 
                     time_birth_low, time_birth_high, 
-                    pool_size),
+                    pool_size
+                    ),
         )
 
         # Parse JSON string columns back into Python objects
@@ -312,7 +314,7 @@ class Evo():
 
         pool = [Individual.model_validate(row.to_dict()) for _, row in df.iterrows()]
 
-        # Run num_jesi tournaments, each of size tournament_size; return winners
+        # Run num_jesi tournaments, each of size tournament_size
         winners = []
         for _ in range(num_jesi):
             contestants = [random.choice(pool) for i in range(tournament_size)]
@@ -327,13 +329,14 @@ class Evo():
         # them in the eval function
 
         for_eval = [ind for ind in population if ind.requires_eval]
-        robot_graphs = [self.gene_to_graph(ind.genotype) for ind in population]
+        robot_graphs = [self.gene_to_graph(ind.genotype) for ind in for_eval]
+        num_inds = len(for_eval)
 
         eval_start_time = time.time()
 
         # Init parallel tasks
         task_ids = []
-        for robot, idx in enumerate(robot_graphs):
+        for robot in robot_graphs:
             oid = evaluate_pair_worker.remote(
                 robot,
                 self.spawn_position_flat,
@@ -343,21 +346,30 @@ class Evo():
 
         # Get all the results
         results = ray.get(task_ids)
-        self.fit_history.append(np.mean(results))
 
-        for res, ind in zip(results, for_eval, strict=True):
-            if ind.requires_eval: 
-                ind.fitness = res
+        # error was here, i was giving the wrong fitnesses
+        # Iterte over pop and fill in the missing fitness values
+        idx_pop = 0
+        idx_for_eval = 0
+        while idx_pop < len(population) and idx_for_eval < len(for_eval):
+            ind = population[idx_pop]
+            if ind.requires_eval:
+                ind.fitness = results[idx_for_eval]
+                ind.requires_eval = False
+                idx_for_eval += 1
+            idx_pop += 1
 
         eval_end_time = time.time()
         console.rule(f"Generation {self.current_gen}/{config.num_of_generations}")
         print(f"Best Fitness: {np.min(results):.3f}")
         print(f"Mean Fitness: {np.mean(results):.3f}")
+        print(f"Number individuals tested: {num_inds}")
         print(f"Gen {self.current_gen} took {eval_end_time-eval_start_time:.3f} seconds")
         self.current_gen += 1
 
         return population
-    
+
+
 @ray.remote(num_cpus=6)
 def evaluate_pair_worker(
     robot_graph,

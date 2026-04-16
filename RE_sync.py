@@ -269,6 +269,7 @@ class Evo():
         results = ray.get(task_ids)
 
         # error was here, i was giving the wrong fitnesses
+        # Iterte over pop and fill in the missing fitness values
         idx_pop = 0
         idx_for_eval = 0
         while idx_pop < len(population) and idx_for_eval < len(for_eval):
