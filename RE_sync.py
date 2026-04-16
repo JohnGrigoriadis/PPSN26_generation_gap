@@ -174,7 +174,7 @@ class Evo():
             competitors = [random.choice(population) for _ in range(tournament_size)]
 
             # pick best competitor depending on maximisation/minimisation
-            if config.is_maximisation:
+            if self.config.is_maximisation:
                 winner = max(competitors, key=lambda ind: ind.fitness)
             else:
                 winner = min(competitors, key=lambda ind: ind.fitness)
@@ -217,9 +217,6 @@ class Evo():
 
     # Completed
     def mutation(self, population: Population) -> Population:
-        """
-        Separate mutations for body and hivemind, due to the possibility of different value ranges begin used.
-        """
         for ind in population:
             if ind.tags.get("mut", False):
                 genes = np.array(ind.genotype).flatten()
@@ -236,37 +233,26 @@ class Evo():
     # Completed
     def survivor_selection(self, population: Population) -> Population:
 
-        tournament_size: int = 5
+        # alive = [ind for ind in population if ind.alive is True]
+        reverse = self.config.is_maximisation  # descending for minimisation so worst are at the end
+        ranked = sorted(population, key=lambda ind: ind.fitness, reverse=reverse)
 
-        # Decide how many parents we want (even number)
-        pop_len = len(population)
+        assert ranked[0].fitness <= ranked[-1].fitness or not self.config, "Ranking error: best fitness is not ranked first"
 
-        for _ in range(pop_len):
-            # Sample competitors with replacement
-            pop_alive = [ind for ind in population if ind.alive is True]
-            death_candidates = [random.choice(pop_alive) for _ in range(tournament_size)]
-
-            # Pick best competitor depending on maximisation/minimisation
-            if config.is_maximisation:
-                about_to_be_killed_lol = min(death_candidates, key=lambda ind: ind.fitness)
-            else:
-                about_to_be_killed_lol = max(death_candidates, key=lambda ind: ind.fitness)
-
-            about_to_be_killed_lol.alive = False
-
-            pop_len -= 1
-            if pop_len <= self.pop_size:
-                break
+        for ind in ranked[self.pop_size:]:
+            ind.alive = False
 
         return population
 
     # Completed
     def evaluate_pop(self, population : Population) -> Population:
 
-        # Turn all NDEs into graphs so we don't have to decode 
-        # them in the eval function
 
         for_eval = [ind for ind in population if ind.requires_eval]
+        non_eval = [ind for ind in population if not ind.requires_eval]
+
+        # Turn all NDEs into graphs so we don't have to decode 
+        # them in the eval function
         robot_graphs = [self.gene_to_graph(ind.genotype) for ind in for_eval]
         num_inds = len(for_eval)
 
@@ -284,18 +270,10 @@ class Evo():
 
         # Get all the results
         results = ray.get(task_ids)
-
-        # error was here, i was giving the wrong fitnesses
-        # Iterte over pop and fill in the missing fitness values
-        idx_pop = 0
-        idx_for_eval = 0
-        while idx_pop < len(population) and idx_for_eval < len(for_eval):
-            ind = population[idx_pop]
-            if ind.requires_eval:
-                ind.fitness = results[idx_for_eval]
-                ind.requires_eval = False
-                idx_for_eval += 1
-            idx_pop += 1
+        
+        for ind, res in zip(for_eval, results, strict=True):
+            ind.fitness = res
+            ind.requires_eval = False
 
         eval_end_time = time.time()
         console.rule(f"Generation {self.current_gen}/{config.num_of_generations}")
@@ -305,6 +283,7 @@ class Evo():
         print(f"Gen {self.current_gen} took {eval_end_time-eval_start_time:.3f} seconds")
         self.current_gen += 1
 
+        population = non_eval + for_eval
         return population
     
 @ray.remote(num_cpus=1)
@@ -339,54 +318,54 @@ def evaluate_pair_worker(
     if model.nu < 2: # type:ignore
         # return bad fitness if robot kinda cannot move
         # made to be adaptabel to different target positions
-        # return target_pos[0]
         return float(np.linalg.norm(np.array(target_pos) - np.array(spawn_pos)))
 
-
-    lr_pop_size = 5
-    generations = 20
+    lr_budget = 100
 
     min_fit = np.inf
 
     net = Network(input_size=input_size, hidden_size=16, output_size=output_size)
     num_vars = sum(p.numel() for p in net.parameters())
 
-    local_learner = ng.optimizers.CMA(
+    local_learner = ng.optimizers.TwoPointsDE(
         parametrization = num_vars,
-        budget = lr_pop_size * generations,
+        budget = lr_budget,
     )
+    # local_learner = ng.optimizers.CMA(
+    #     parametrization = num_vars,
+    #     budget = lr_budget,
+    # )
 
     tracker = Tracker(name_to_bind="core", observable_attributes=["xpos"], quiet=True)
     tracker.setup(world.spec, data)
 
     controller = Controller(controller_callback_function=net.forward, tracker=tracker)
-    for _ in range(generations):
-        vecs = [local_learner.ask() for _ in range(lr_pop_size)]
+    for _ in range(lr_budget):
+        candidate = local_learner.ask()
 
-        for vec_candidate in vecs:
-            # 3. Network Construction
-            fill_parameters(net, vec_candidate.value)
+        # 3. Network Construction
+        fill_parameters(net, candidate.value)
 
-            mj.mj_resetData(model, data)  # type:ignore
-            # Compensate for "flop"
-            simple_runner(model, data, duration=3) # type:ignore
-            displacement = data.qpos[0:3].copy()
+        mj.mj_resetData(model, data)  # type:ignore
+        # Compensate for "flop"
+        simple_runner(model, data, duration=2) # type:ignore
+        displacement = data.qpos[0:3].copy()
 
-            # Add "flop" displacement to target so needed distance stays the same.
-            # Should not be used with olympic arena for now...
-            (xt, yt, zt) = np.array(target_pos)  + displacement
+        # Add "flop" displacement to target so needed distance stays the same.
+        # Should not be used with olympic arena for now...
+        (xt, yt, zt) = np.array(target_pos)  + displacement
 
-            mj.set_mjcb_control(lambda m, d: controller.set_control(m, d, target_position=(xt, yt, zt)))
-            # 4. Run Simulation
-            simple_runner(model, data, duration=10)  # type: ignore
+        mj.set_mjcb_control(lambda m, d: controller.set_control(m, d, target_position=(xt, yt, zt)))
+        # 4. Run Simulation
+        simple_runner(model, data, duration=10)  # type: ignore
 
-            # 5. Calculate Fitness
-            xc, yc, zc = data.qpos[0:3].copy()
-            fitness = np.sqrt((xt - xc) ** 2 + (yt - yc) ** 2 + (zt - zc) ** 2)
+        # 5. Calculate Fitness
+        xc, yc, zc = data.qpos[0:3].copy()
+        fitness = np.sqrt((xt - xc) ** 2 + (yt - yc) ** 2 + (zt - zc) ** 2)
 
-            local_learner.tell(vec_candidate, fitness)
+        local_learner.tell(candidate, fitness)
 
-            min_fit = min(min_fit, fitness)
+        min_fit = min(min_fit, fitness)
 
     return min_fit
 
