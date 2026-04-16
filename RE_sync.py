@@ -337,7 +337,7 @@ def evaluate_pair_worker(
     param = ng.p.Array(init=initial_weights)
     param.set_mutation(sigma=0.075)
 
-    cma_config = ng.optimizers.ParametrizedCMA(popsize=POP_SIZE)
+    cma_config = ng.optimizers.ParametrizedCMA()
     local_learner = cma_config(
         parametrization=param,
         budget=lr_budget,

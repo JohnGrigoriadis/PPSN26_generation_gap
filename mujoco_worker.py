@@ -1,21 +1,26 @@
 """MuJoCo worker for parallel robot evaluation.
 
-Contains the simulation and controller optimization logic to be run in
-separate processes. Sets PyTorch threads to 1 to prevent oversubscription.
+Standalone worker for parallel MuJoCo evaluation using Nevergrad CMA-ES.
+Fully importable, no shared state, zero-order hold control.
+
+Designed to be called via multiprocessing.Pool.imap from RE_async.py:
+    evaluate_individual((xml_string, EvalConfig)) -> float
+where the returned float is the best (lowest) distance-to-target fitness
+found over the inner CMA-ES loop.
 """
 
 import os
 
-# Limit OpenMP threads before importing numpy/pytorch
-os.environ["OMP_NUM_THREADS"] = "1"
+# Limit OpenMP threads BEFORE importing numpy/torch in workers
+os.environ.setdefault("OMP_NUM_THREADS", "1")
 
-from collections.abc import Callable
 from dataclasses import dataclass
 
 import mujoco as mj
 import nevergrad as ng
 import numpy as np
 import torch
+from torch import nn
 
 
 @dataclass
@@ -29,103 +34,87 @@ class EvalConfig:
     seed: int | None = None
 
 
-class Network:
-    """Simple feedforward controller (ANN)."""
-
+class ANN(nn.Module):
     def __init__(
-        self, input_size: int, hidden_size: int, output_size: int
+        self,
+        input_size: int,
+        output_size: int,
+        hidden_size: int = 32,
     ) -> None:
-        self.W1 = torch.randn(hidden_size, input_size)
-        self.b1 = torch.zeros(hidden_size)
-        self.W2 = torch.randn(output_size, hidden_size)
-        self.b2 = torch.zeros(output_size)
+        super().__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.fc_out = nn.Linear(hidden_size, output_size)
+        self.hidden_activation = nn.ELU()
+        self.output_activation = nn.Tanh()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = torch.relu(self.W1 @ x + self.b1)
-        return torch.tanh(self.W2 @ x + self.b2)
+        for p in self.parameters():
+            p.requires_grad = False
 
-    def parameters(self):
-        return [self.W1, self.b1, self.W2, self.b2]
+    @torch.inference_mode()
+    def forward(self, state: torch.Tensor) -> np.ndarray:
+        x = self.hidden_activation(self.fc1(state))
+        x = self.hidden_activation(self.fc2(x))
+        x = self.output_activation(self.fc_out(x)) * (torch.pi / 2)
+        return x.detach().numpy()
 
-
-def fill_parameters(net: Network, params: np.ndarray) -> None:
-    """Fill network parameters from flat array."""
-    offset = 0
-    for p in net.parameters():
-        numel = p.numel()
-        p.data = torch.tensor(
-            params[offset : offset + numel],
+    def __call__(self, model: mj.MjModel, data: mj.MjData) -> None:
+        # Observation: orientation quaternion + phase clock
+        qpos = data.qpos[3:7].copy() if data.qpos.size >= 7 else np.zeros(4)
+        phase_inputs = np.array(
+            [
+                2.0 * np.sin(data.time * 2.0 * np.pi),
+                2.0 * np.cos(data.time * 2.0 * np.pi),
+            ],
+            dtype=np.float32,
+        )
+        obs = torch.tensor(
+            np.concatenate([qpos, phase_inputs]).astype(np.float32),
             dtype=torch.float32,
-        ).reshape(p.shape)
-        offset += numel
+        )
+
+        with torch.no_grad():
+            action = self.forward(obs)
+
+        # Zero-order hold
+        if action.shape[0] != model.nu:
+            action = np.resize(action, model.nu)
+        data.ctrl[:] = action
 
 
-def get_robot_state(
-    data: mj.MjData,
-    target_position: tuple[float, ...],
-) -> np.ndarray:
-    """Extract state vector for controller."""
-    pos = data.qpos[:3].copy()
-    target_vec = np.array(target_position) - pos
-    dist = np.linalg.norm(target_vec) + 1e-6
-    target_vec /= dist
-    return np.concatenate([data.qpos.copy(), data.qvel.copy(), target_vec])
-
-
-class Tracker:
-    """Minimal tracker implementation."""
-
-    def __init__(
-        self,
-        name_to_bind: str,
-        observable_attributes: list,
-        quiet: bool = True,
-    ) -> None:
-        self.quiet = quiet
-
-    def setup(self, spec, data: mj.MjData) -> None:
-        pass
-
-
-class Controller:
-    """Neural network controller interface."""
-
-    def __init__(
-        self,
-        controller_callback_function: Callable,
-        tracker: Tracker,
-    ) -> None:
-        self.callback = controller_callback_function
-        self.tracker = tracker
-
-    def set_control(
-        self,
-        m: mj.MjModel,
-        d: mj.MjData,
-        target_position: tuple[float, ...],
-    ) -> None:
-        state = get_robot_state(d, target_position)
-        state_t = torch.tensor(state, dtype=torch.float32)
-        control = self.callback(state_t).detach().numpy()
-        if len(control) != m.nu:
-            control = np.resize(control, m.nu)
-        d.ctrl[:] = control
+def fill_parameters(net: ANN, flat_weights: np.ndarray) -> None:
+    """Inject a flat weight vector into the network's parameters."""
+    flat_weights = np.ascontiguousarray(flat_weights, dtype=np.float32)
+    with torch.no_grad():
+        idx = 0
+        for param in net.parameters():
+            numel = param.numel()
+            param.copy_(
+                torch.from_numpy(flat_weights[idx : idx + numel]).view_as(param),
+            )
+            idx += numel
 
 
 def evaluate_individual(args: tuple[str, EvalConfig]) -> float:
     """Evaluate a single robot using CMA-ES controller optimization.
 
     Args:
-        args: Tuple of (xml_string, config) where xml_string is the full MuJoCo XML (world + robot) and config contains evaluation params.
+        args: (xml_string, EvalConfig) — full MuJoCo XML (world + robot) and
+            evaluation parameters.
 
     Returns
     -------
-        Best fitness (distance to target, lower is better).
+        Best fitness (distance to target, lower is better) found across the
+        inner CMA-ES loop.
     """
-    # Critical: Limit PyTorch threads in subprocess
+    # Critical: prevent PyTorch oversubscription in subprocess
     torch.set_num_threads(1)
 
     xml_string, config = args
+
+    spawn = np.array(config.spawn_position)
+    target = np.array(config.target_position)
+    base_dist = float(np.linalg.norm(target - spawn))
 
     # Load model from XML
     try:
@@ -133,75 +122,55 @@ def evaluate_individual(args: tuple[str, EvalConfig]) -> float:
         data = mj.MjData(model)
     except Exception:
         # Penalty for invalid morphology
-        return float(
-            np.linalg.norm(
-                np.array(config.target_position)
-                - np.array(config.spawn_position),
-            )
-            * 10,
-        )
+        return base_dist * 10.0
 
     # Early exit for immobile robots
     if model.nu < 2:
-        return float(
-            np.linalg.norm(
-                np.array(config.target_position)
-                - np.array(config.spawn_position),
-            ),
-        )
+        return base_dist
 
-    # Setup controller
-    input_size = len(
-        get_robot_state(data, target_position=config.target_position),
-    )
-    net = Network(input_size=input_size, hidden_size=16, output_size=model.nu)
+    # Network sized to robot's actuator count
+    obs_dim = 6  # 4 (quaternion) + 2 (phase)
+    action_dim = model.nu
+    net = ANN(input_size=obs_dim, output_size=action_dim)
     num_vars = sum(p.numel() for p in net.parameters())
 
-    # CMA-ES setup
+    # CMA-ES setup (mirrors RE_sync's ParametrizedCMA usage)
     rng = np.random.default_rng(config.seed)
-    opt = ng.optimizers.CMA(
-        parametrization=num_vars,
-        budget=config.cma_generations * config.cma_pop_size,
-    )
+    initial_weights = rng.uniform(-0.5, 0.5, size=(num_vars,))
+    param = ng.p.Array(init=initial_weights)
+    param.set_mutation(sigma=0.075)
 
-    controller = Controller(
-        controller_callback_function=net.forward,
-        tracker=Tracker("core", ["xpos"], quiet=True),
+    cma_config = ng.optimizers.ParametrizedCMA()
+    opt = cma_config(
+        parametrization=param,
+        budget=config.cma_generations * config.cma_pop_size,
     )
 
     min_fitness = float("inf")
 
-    # Optimization loop
     for _ in range(config.cma_generations):
         candidates = [opt.ask() for _ in range(config.cma_pop_size)]
 
         for cand in candidates:
-            fill_parameters(net, cand.value)
+            fill_parameters(net, np.asarray(cand.value))
             mj.mj_resetData(model, data)
 
-            # Warmup (3s)
+            # Warmup (~3s) — let the body settle / "flop"
             data.ctrl[:] = rng.normal(scale=0.1, size=model.nu)
             mj.mj_step(model, data, nstep=300)
 
-            # Adjust target based on displacement
+            # Re-anchor target relative to settled position
             displacement = data.qpos[:3].copy()
-            adjusted_target = tuple(
-                np.array(config.target_position) + displacement,
-            )
+            adjusted_target = target + displacement
 
-            # Controlled simulation (10s)
-            def cb(m, d) -> None:
-                controller.set_control(m, d, target_position=adjusted_target)
-
-            mj.set_mjcb_control(cb)
+            # Controlled rollout (~10s)
+            mj.set_mjcb_control(lambda m, d: net(m, d))
             mj.mj_step(model, data, nstep=1000)
             mj.set_mjcb_control(None)
 
-            # Fitness
+            # Distance-to-target fitness (lower is better)
             final_pos = data.qpos[:3].copy()
-            fitness = float(
-                np.linalg.norm(np.array(adjusted_target) - final_pos),
-            )
+            fitness = float(np.linalg.norm(adjusted_target - final_pos))
             opt.tell(cand, fitness)
             min_fitness = min(min_fitness, fitness)
 
