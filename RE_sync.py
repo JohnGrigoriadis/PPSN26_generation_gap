@@ -67,18 +67,27 @@ GENE_SIZE = 64
 CWD = Path.cwd()
 SCRIPT_NAME = __file__.split("/")[-1][:-3]
 DATA = Path(CWD / "__data__" / SCRIPT_NAME)
-DATA.mkdir(exist_ok=True)
+DATA.mkdir(parents=True, exist_ok=True)
+
+_db_base = "database"
+_db_name = f"{_db_base}.db"
+_counter = 1
+while (DATA / _db_name).exists():
+    _db_name = f"{_db_base}_{_counter}.db"
+    _counter += 1
 
 # Show cwd
 print(f"Current working directory: {CWD}")
 print(f"Saving data to {DATA}")
+print(f"Database: {_db_name}")
 
 # Lets get this going YYYEEEAAAHHH
 config = EASettings(output_folder=DATA,
+                    db_file_name=_db_name,
                     is_maximisation=False,
-                    num_of_generations=NUM_GENERATIONS, 
-                    db_handling="delete",
-                    target_population_size=POP_SIZE 
+                    num_of_generations=NUM_GENERATIONS,
+                    db_handling="halt",
+                    target_population_size=POP_SIZE
                     )
 
 # ============================================================================ #
@@ -106,7 +115,7 @@ class Evo():
 
     def __init__(self,
                 pop_size:int,
-
+                config: EASettings = config
                  ) -> None:
         self.current_gen = 0
         
@@ -125,6 +134,8 @@ class Evo():
         torch.save(self.nde.state_dict(), DATA/"NDE.pth")
 
         self.hpd = HighProbabilityDecoder(num_modules=NUM_MODULES)
+
+        self.config = config
 
     # Currently Completed
     def gene_to_graph(self, genotype):
@@ -146,14 +157,14 @@ class Evo():
     # Completed
     def parent_selection(self, population: Population) -> Population:
         """Tournament Selection"""
-        tournament_size: int = 5
+        tournament_size: int = 3
 
         # Ensure all individuals have a tags dict and reset parent-selection tag
         for ind in population:
             ind.tags['ps'] = False
 
         # Decide how many parents we want (even number)
-        num_parents = (len(population) // 2) * 2
+        num_parents = (len(population) // 2) + 1
         if num_parents == 0 and len(population) >= 2:
             num_parents = 2
 
@@ -177,9 +188,13 @@ class Evo():
         """One point crossover"""
 
         parents = [ind for ind in population if ind.tags.get("ps", False)]
-        for idx in range(0, len(parents), 2):
-            parent_i = parents[idx]
-            parent_j = parents[idx]
+        print(len(parents))
+
+        num_children = 0
+        while num_children < self.config.target_population_size // 2:
+            idx_i, idx_j = np.random.choice(len(parents), size=2, replace=False)
+            parent_i : Individual = parents[idx_i]
+            parent_j : Individual = parents[idx_j]
             genotype_i, genotype_j = Crossover.one_point(parent_i.genotype, 
                                                         parent_j.genotype)
 
@@ -196,6 +211,8 @@ class Evo():
             child_j.requires_eval = True
 
             population.extend([child_i, child_j])
+            num_children += 2
+
         return population
 
     # Completed
@@ -290,7 +307,7 @@ class Evo():
 
         return population
     
-@ray.remote(num_cpus=6)
+@ray.remote(num_cpus=1)
 def evaluate_pair_worker(
     robot_graph,
     spawn_pos: tuple[float, float, float],
@@ -322,10 +339,12 @@ def evaluate_pair_worker(
     if model.nu < 2: # type:ignore
         # return bad fitness if robot kinda cannot move
         # made to be adaptabel to different target positions
-        return target_pos[0]
+        # return target_pos[0]
+        return float(np.linalg.norm(np.array(target_pos) - np.array(spawn_pos)))
 
-    lr_pop_size = 10 
-    generations = 10
+
+    lr_pop_size = 5
+    generations = 20
 
     min_fit = np.inf
 
@@ -355,11 +374,11 @@ def evaluate_pair_worker(
 
             # Add "flop" displacement to target so needed distance stays the same.
             # Should not be used with olympic arena for now...
-            (xt, yt, zt) = target_pos  + displacement
+            (xt, yt, zt) = np.array(target_pos)  + displacement
 
             mj.set_mjcb_control(lambda m, d: controller.set_control(m, d, target_position=(xt, yt, zt)))
             # 4. Run Simulation
-            simple_runner(model, data, duration=15)  # type: ignore
+            simple_runner(model, data, duration=10)  # type: ignore
 
             # 5. Calculate Fitness
             xc, yc, zc = data.qpos[0:3].copy()
@@ -443,7 +462,9 @@ def evolve() -> EA:
 def main():
 
     # Initialize Ray. ignore_reinit_error=True helps if you run this in a notebook/loop
-    ray.init(ignore_reinit_error=True)
+    ray.init(ignore_reinit_error=True,
+             num_cpus=6, # Set this to the number of cores you want to use for parallel evaluation
+             )
 
     _ = evolve()
     # torch.save(best_hivemind.genotype, Path("__data__/best_hivemind_data.pth"))
