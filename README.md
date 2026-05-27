@@ -45,7 +45,7 @@ PPSN_experiment/
 └── pyproject.toml              # uv project config and dependency declarations
 ```
 
-Output is written to `__data__/<script-name>/` as a SQLite database that can be explored with `view_results_from_db.ipynb`.
+Output is written to `__data__/<experiment>/` as a SQLite database that can be explored with `view_results_from_db.ipynb`.
 
 ---
 
@@ -76,31 +76,45 @@ uv sync
 
 ## Running
 
-### Baseline (synchronous)
+All three scripts share the same CLI. Run any of them with `--help` to see all options:
 
 ```bash
+uv run python RE_sync.py --help
+uv run python RE_async.py --help
+uv run python RE_JESUS.py --help
+```
+
+### Common options
+
+| Flag | Default | Description |
+|---|---|---|
+| `--pop-size` / `-p` | 50 | Population size |
+| `--generations` / `-g` | 100 | Number of generations |
+| `--modules` / `-m` | 20 | Max body modules |
+| `--gene-size` | 64 | Genotype size per NDE layer |
+| `--cma-gen` | 20 | CMA-ES generations per robot eval |
+| `--cma-pop` | 10 | CMA-ES population size per robot eval |
+| `--seed` / `-s` | *(random)* | Random seed for reproducibility |
+| `--output` / `-o` | `__data__` | Output directory |
+
+### Examples
+
+```bash
+# Run with defaults
 uv run python RE_sync.py
-```
-
-### Asynchronous
-
-```bash
-uv run python RE_async.py --help          # list all options
-uv run python RE_async.py                 # run with defaults
-uv run python RE_async.py \
-    --pop-size 50 \
-    --generations 100 \
-    --cma-gen 10 \
-    --cma-pop 10 
-```
-
-### Archive (J.E.S.U.S.) variant
-
-```bash
+uv run python RE_async.py
 uv run python RE_JESUS.py
+
+# Reproducible short run for testing
+uv run python RE_async.py --generations 10 --pop-size 20 --seed 42
+
+# Check the status of previous runs
+uv run python RE_sync.py status
+uv run python RE_async.py status
+uv run python RE_JESUS.py status
 ```
 
-Hyper-parameters (population size, number of generations, CMA-ES settings, number of parallel workers) are defined as constants at the top of each script.
+Output is written to `__data__/<experiment>/` as a SQLite database.
 
 ---
 
