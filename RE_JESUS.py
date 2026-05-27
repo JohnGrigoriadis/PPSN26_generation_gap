@@ -1,232 +1,179 @@
-"""
-John, synchronous body-brain evolution with J.E.S.U.S.(Joint Evolution Strategies with Undead Sampling).
+"""Synchronous body-brain co-evolution with J.E.S.U.S.
+
+J.E.S.U.S. (Joint Evolution Strategies with Undead Sampling) detects
+population stagnation and injects historically successful individuals
+retrieved from the EA's own SQLite archive.
 """
 
-# Imports
 import random
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
-import mujoco as mj
-# from mujoco import viewer
-import sqlite3
-import json
+from typing import Annotated, Any
+
 import numpy as np
-import pandas as pd
 import torch
-
-# Ray for parallelisation
-import ray
-
-# Type Checking
-from networkx import DiGraph
-from typing import Any
-
-# Ariel Imports 
-
-# Learning EA
-import nevergrad as ng
-
-# Fix After refactoring
-from ariel.ec.a001 import Individual
-from ariel.ec.a004 import EA, EASettings, EAStep, Population
-from ariel.ec.a005 import Crossover
-
-# Body imports
-from ariel.ec.genotypes.nde import NeuralDevelopmentalEncoding
-from ariel.simulation.controllers.controller import Controller, Tracker
-from ariel.body_phenotypes.robogen_lite.constructor import construct_mjspec_from_graph
+import typer
+from ariel.body_phenotypes.robogen_lite.constructor import (
+    construct_mjspec_from_graph,
+)
 from ariel.body_phenotypes.robogen_lite.decoders.hi_prob_decoding import (
-        HighProbabilityDecoder,
+    HighProbabilityDecoder,
 )
-
-# Import World
-from ariel.simulation.environments import (  
-        # Simple Flat used in initial testing
-        SimpleFlatWorld,
+from ariel.ec import (
+    EA,
+    Archive,
+    Crossover,
+    EAOperation,
+    EASettings,
+    Individual,
+    Population,
 )
-
-# from ariel.utils.runners import simple_runner
-# Hivemind related import
-from network import Network
-from nn_utils import fill_parameters, get_robot_state
-
-# Pretty little errors and progress bars
+from ariel.ec.genotypes.nde import NeuralDevelopmentalEncoding
+from ariel.simulation.environments import SimpleFlatWorld
+from networkx import DiGraph
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
+from rich.table import Table
 from rich.traceback import install
+from robot_worker import LocomotionConfig, run_pool
 
-# Initialize rich console and traceback handler
 install(width=180)
 console = Console()
-print = console.log
 
-POP_SIZE = 50
-NUM_GENERATIONS = 100
+app = typer.Typer(
+    name="re-jesus",
+    help="Body-brain co-evolution with J.E.S.U.S. stagnation recovery.",
+    rich_markup_mode="rich",
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 
-RNG = np.random.default_rng()
-NUM_MODULES = 20
-GENE_SIZE = 64 
-
+DEFAULT_POP_SIZE: int = 50
+DEFAULT_NUM_GENERATIONS: int = 100
+DEFAULT_NUM_MODULES: int = 20
+DEFAULT_GENE_SIZE: int = 64
+DEFAULT_CMA_GENERATIONS: int = 20
+DEFAULT_CMA_POP_SIZE: int = 10
+NUM_WORKERS: int = 6
 
 CWD = Path.cwd()
-SCRIPT_NAME = __file__.split("/")[-1][:-3]
-DATA = Path(CWD / "__data__" / SCRIPT_NAME)
-DATA.mkdir(parents=True, exist_ok=True)
 
-_db_base = "database"
-_db_name = f"{_db_base}.db"
-_counter = 1
-while (DATA / _db_name).exists():
-    _db_name = f"{_db_base}_{_counter}.db"
-    _counter += 1
 
-# Show cwd
-print(f"Current working directory: {CWD}")
-print(f"Saving data to {DATA}")
-
-# Lets get this going YYYEEEAAAHHH
-config = EASettings(output_folder=DATA,
-                    is_maximisation=False,
-                    num_of_generations=NUM_GENERATIONS, 
-                    db_handling="delete",
-                    target_population_size=POP_SIZE 
-                    )
-
-# ============================================================================ #
-#                           Population Handling                                #
-# ============================================================================ #
-
-# Currently Completed
-def create_individual(gene_size) -> Individual:
-        """
-        Create and initialise BODY individual 
-        """
-
-        ind = Individual()
-        ind.genotype = np.random.normal(loc=0,
-                                        scale=64, 
-                                        size=(3 , gene_size)).tolist()
-        
-        return ind
-
-# ------------------------------------------------------------------------ #
-#                             EA Operators                                 #
-# ------------------------------------------------------------------------ #
-class Evo():
-
-    def __init__(self,
-                pop_size:int,
-                config: EASettings = config
-                 ) -> None:
-        self.current_gen = 0
-        
+class EvolutionConfig:
+    def __init__(
+        self,
+        pop_size: int = DEFAULT_POP_SIZE,
+        num_generations: int = DEFAULT_NUM_GENERATIONS,
+        num_modules: int = DEFAULT_NUM_MODULES,
+        gene_size: int = DEFAULT_GENE_SIZE,
+        cma_generations: int = DEFAULT_CMA_GENERATIONS,
+        cma_pop_size: int = DEFAULT_CMA_POP_SIZE,
+        data_dir: Path = Path(CWD / "__data__/RE_JESUS"),
+        seed: int | None = None,
+    ) -> None:
         self.pop_size = pop_size
+        self.num_generations = num_generations
+        self.num_modules = num_modules
+        self.gene_size = gene_size
+        self.cma_generations = cma_generations
+        self.cma_pop_size = cma_pop_size
+        self.data_dir = data_dir
+        self.seed = seed
+        self.rng = np.random.default_rng(seed)
 
-        # Spawn positions for the 2 testing environments
-        self.spawn_position_flat : tuple[float, float, float] = (0.0, 0.0, 0.1)
 
-        # Target positions for the 2 testing environments
-        self.target_position_flat: tuple[float, float, float] = (2, 0.0, 0.1)
+def create_individual(gene_size: int) -> Individual:
+    ind = Individual()
+    ind.genotype = np.random.normal(
+        loc=0, scale=64, size=(3, gene_size)
+    ).tolist()
+    return ind
 
-        # NDE 
-        self.nde = NeuralDevelopmentalEncoding(number_of_modules=NUM_MODULES, # Seems to be a good value
-                                                genotype_size=64
-                                                )
-        torch.save(self.nde.state_dict(), DATA/"NDE.pth")
 
-        self.hpd = HighProbabilityDecoder(num_modules=NUM_MODULES)
+class Evo:
+    def __init__(
+        self, config: EvolutionConfig, ea_settings: EASettings
+    ) -> None:
+        self.current_gen = 0
+        self.pop_size = config.pop_size
+        self.spawn_position: tuple[float, float, float] = (0.0, 0.0, 0.1)
+        self.target_position: tuple[float, float, float] = (2.0, 0.0, 0.1)
 
-        self.fit_history = []
+        self.nde = NeuralDevelopmentalEncoding(
+            number_of_modules=config.num_modules,
+            genotype_size=config.gene_size,
+        )
+        torch.save(self.nde.state_dict(), config.data_dir / "NDE.pth")
 
-        self.conn = sqlite3.connect(DATA)
+        self.hpd = HighProbabilityDecoder(num_modules=config.num_modules)
+        self.fit_history: list[float] = []
+        self.config = ea_settings
+        self.evo_config = config
+        self._archive: Archive | None = None
 
-        # We gotta find JESUS
-        self.query = """
-            SELECT *
-            FROM individual
-            WHERE (TIME_OF_DEATH BETWEEN ? AND ?) AND (TIME_OF_BIRTH BETWEEN ? AND ?)
-            ORDER BY RANDOM()
-            LIMIT ?
-        """
-
-        self.config = config
-
-    # Completed
-    def gene_to_graph(self, genotype):
-        """Create mujoco specification from robot genotype"""
-
-        # nde_gene = np.array(genotype).reshape(())
+    def gene_to_graph(self, genotype) -> DiGraph[Any]:
         p_matrices = self.nde.forward(genotype)
-
-        # Decode the high-probability graph
-        robot_graph: DiGraph[Any] = self.hpd.probability_matrices_to_graph(
+        return self.hpd.probability_matrices_to_graph(
             p_matrices[0],
             p_matrices[1],
             p_matrices[2],
         )
 
-        # robot_spec = construct_mjspec_from_graph(robot_graph)
-        return robot_graph
-    
-    # Completed
     def parent_selection(self, population: Population) -> Population:
-        """Tournament Selection"""
-        tournament_size: int = 3
+        tournament_size = 3
 
         if self.do_we_need_jesus():
-            console.log("Summoning JESUS to prevent stagnation...")
+            console.log("Summoning J.E.S.U.S. to prevent stagnation...")
             jesi = self.jesi(
-                median_age=50, 
-                num_jesi=10, 
-                tournament_size=tournament_size
+                median_age=50, num_jesi=10, tournament_size=tournament_size
             )
             population.extend(jesi)
 
-        # Ensure all individuals have a tags dict and reset parent-selection tag
         for ind in population:
-            ind.tags['ps'] = False
+            ind.tags["ps"] = False
 
-        # Decide how many parents we want (even number)
         num_parents = (len(population) // 2) * 2
         if num_parents == 0 and len(population) >= 2:
             num_parents = 2
 
-        # winners : Population = []
         for _ in range(num_parents):
-            # sample competitors with replacement
-            competitors = [random.choice(population) for _ in range(tournament_size)]
-
-            # pick best competitor depending on maximisation/minimisation
-            if config.is_maximisation:
+            competitors = [
+                random.choice(list(population)) for _ in range(tournament_size)
+            ]
+            if self.config.is_maximisation:
                 winner = max(competitors, key=lambda ind: ind.fitness)
             else:
                 winner = min(competitors, key=lambda ind: ind.fitness)
-
-            winner.tags['ps'] = True
+            winner.tags["ps"] = True
 
         return population
 
-    # Completed
     def crossover(self, population: Population) -> Population:
-        """One point crossover"""
-
         parents = [ind for ind in population if ind.tags.get("ps", False)]
-        print(len(parents))
 
         num_children = 0
         while num_children < self.config.target_population_size // 2:
             idx_i, idx_j = np.random.choice(len(parents), size=2, replace=False)
-            parent_i : Individual = parents[idx_i]
-            parent_j : Individual = parents[idx_j]
-            genotype_i, genotype_j = Crossover.one_point(parent_i.genotype, 
-                                                        parent_j.genotype)
+            parent_i: Individual = parents[idx_i]
+            parent_j: Individual = parents[idx_j]
+            genotype_i, genotype_j = Crossover.one_point(
+                parent_i.genotype, parent_j.genotype
+            )
 
-            # First child
             child_i = Individual()
             child_i.genotype = genotype_i
             child_i.tags = {"mut": True}
             child_i.requires_eval = True
 
-            # Second child
             child_j = Individual()
             child_j.genotype = genotype_j
             child_j.tags = {"mut": True}
@@ -237,332 +184,304 @@ class Evo():
 
         return population
 
-    # Completed
     def mutation(self, population: Population) -> Population:
-        """
-        Separate mutations for body and hivemind, due to the possibility of different value ranges begin used.
-        """
         for ind in population:
             if ind.tags.get("mut", False):
                 genes = np.array(ind.genotype).flatten()
                 if random.random() < 0.7:
-                    
-                    mutated = np.array([np.array(i) + np.random.normal(0, 4) for i in genes])
+                    mutated = genes + np.random.normal(0, 4, size=genes.shape)
                 else:
                     mutated = genes.copy()
-
-                ind.genotype = mutated.reshape((3,-1)).tolist()
-                
+                ind.genotype = mutated.reshape((3, -1)).tolist()
         return population
 
-    # Completed
     def survivor_selection(self, population: Population) -> Population:
-
-        tournament_size: int = 3
-
-        # Decide how many parents we want (even number)
+        tournament_size = 3
         pop_len = len(population)
 
         for _ in range(pop_len):
-            # Sample competitors with replacement
             pop_alive = [ind for ind in population if ind.alive is True]
-            death_candidates = [random.choice(pop_alive) for _ in range(tournament_size)]
+            death_candidates = [
+                random.choice(pop_alive) for _ in range(tournament_size)
+            ]
 
-            # Pick best competitor depending on maximisation/minimisation
-            if config.is_maximisation:
-                about_to_be_killed_lol = min(death_candidates, key=lambda ind: ind.fitness)
+            if self.config.is_maximisation:
+                to_kill = min(death_candidates, key=lambda ind: ind.fitness)
             else:
-                about_to_be_killed_lol = max(death_candidates, key=lambda ind: ind.fitness)
+                to_kill = max(death_candidates, key=lambda ind: ind.fitness)
 
-            about_to_be_killed_lol.alive = False
-
+            to_kill.alive = False
             pop_len -= 1
             if pop_len <= self.pop_size:
                 break
 
         return population
-    
-    # Completed
-    def do_we_need_jesus(self, 
-                         window: int = 10, 
-                         threshold: float = 0.2) -> bool:
-        """
-        Returns True if the most recent generation's mean fitness is stagnating
-        relative to the previous window generations.
-        """
+
+    def do_we_need_jesus(
+        self, window: int = 10, threshold: float = 0.2
+    ) -> bool:
+        """Return True when mean fitness has stagnated over the last `window` generations."""
         if len(self.fit_history) < window + 1:
             return False
-
         current = self.fit_history[-1]
         window_mean = np.mean(self.fit_history[-window - 1 : -1])
-
         return bool(np.isclose(current, window_mean, rtol=threshold))
 
-    #? Work in Progress
-    def jesi(self,
-             median_age: int,
-             num_jesi: int,
-             tournament_size: int,
-            ) -> list[Individual]:
-        
-        assert tournament_size <= num_jesi, "Tournament size must be <= JESI individuals."
+    def jesi(
+        self,
+        median_age: int,
+        num_jesi: int,
+        tournament_size: int,
+    ) -> list[Individual]:
+        """Resurrect historically fit individuals via tournament selection on the archive."""
+        assert tournament_size <= num_jesi, (
+            "tournament_size must be <= num_jesi"
+        )
 
         time_death_low = max(0, median_age - 10)
         time_death_high = median_age
-
         time_birth_low = 0
-        time_birth_high = time_death_low - 5
+        time_birth_high = max(0, time_death_low - 5)
 
-        # Fetch a larger pool so tournaments have meaningful competition
-        pool_size = num_jesi * tournament_size
+        if self._archive is None:
+            self._archive = Archive(self.config.db_file_path)
 
-        df = pd.read_sql_query(
-            self.query,
-            self.conn,
-            params=(time_death_low, time_death_high, 
-                    time_birth_low, time_birth_high, 
-                    pool_size
-                    ),
+        winners = self._archive.tournament_population(
+            n=num_jesi,
+            tournament_size=tournament_size,
+            death_range=(time_death_low, time_death_high),
+            birth_range=(time_birth_low, time_birth_high),
+            fitness_mode="min",
         )
+        return list(winners)
 
-        # Parse JSON string columns back into Python objects
-        for col in ("genotype_", "tags_"):
-            df[col] = df[col].apply(lambda v: json.loads(v) if isinstance(v, str) else v)
-
-        pool = [Individual.model_validate(row.to_dict()) for _, row in df.iterrows()]
-
-        # Run num_jesi tournaments, each of size tournament_size
-        winners = []
-        for _ in range(num_jesi):
-            contestants = [random.choice(pool) for i in range(tournament_size)]
-            winners.append(max(contestants, key=lambda ind: ind.fitness))
-
-        return winners
-    
-    # Completed
-    def evaluate_pop(self, population : Population) -> Population:
-
-        # Turn all NDEs into graphs so we don't have to decode 
-        # them in the eval function
-
+    def evaluate_pop(self, population: Population) -> Population:
         for_eval = [ind for ind in population if ind.requires_eval]
-        robot_graphs = [self.gene_to_graph(ind.genotype) for ind in for_eval]
-        num_inds = len(for_eval)
+        non_eval = [ind for ind in population if not ind.requires_eval]
 
-        eval_start_time = time.time()
+        eval_args = []
+        for i, ind in enumerate(for_eval):
+            robot_graph = self.gene_to_graph(ind.genotype)
+            robot_spec_obj = construct_mjspec_from_graph(robot_graph)
 
-        # Init parallel tasks
-        task_ids = []
-        for robot in robot_graphs:
-            oid = evaluate_pair_worker.remote(
-                robot,
-                self.spawn_position_flat,
-                self.target_position_flat,
+            world = SimpleFlatWorld()
+            world.spawn(
+                robot_spec_obj.spec,
+                position=self.spawn_position,
+                correct_collision_with_floor=True,
             )
-            task_ids.append(oid)
+            xml_string = world.spec.to_xml()
 
-        # Get all the results
-        results = ray.get(task_ids)
+            eval_config = LocomotionConfig(
+                cma_generations=self.evo_config.cma_generations,
+                cma_pop_size=self.evo_config.cma_pop_size,
+                spawn_position=self.spawn_position,
+                target_position=self.target_position,
+                seed=self.current_gen * 10000 + i,
+            )
+            eval_args.append((xml_string, eval_config))
 
-        # error was here, i was giving the wrong fitnesses
-        # Iterte over pop and fill in the missing fitness values
-        idx_pop = 0
-        idx_for_eval = 0
-        while idx_pop < len(population) and idx_for_eval < len(for_eval):
-            ind = population[idx_pop]
-            if ind.requires_eval:
-                ind.fitness = results[idx_for_eval]
-                ind.requires_eval = False
-                idx_for_eval += 1
-            idx_pop += 1
+        eval_start = time.time()
+        results = run_pool(eval_args, num_workers=NUM_WORKERS)
+        eval_time = time.time() - eval_start
 
-        eval_end_time = time.time()
-        console.rule(f"Generation {self.current_gen}/{config.num_of_generations}")
-        print(f"Best Fitness: {np.min(results):.3f}")
-        print(f"Mean Fitness: {np.mean(results):.3f}")
-        print(f"Number individuals tested: {num_inds}")
-        print(f"Gen {self.current_gen} took {eval_end_time-eval_start_time:.3f} seconds")
+        for ind, res in zip(for_eval, results, strict=True):
+            ind.fitness = res
+            ind.requires_eval = False
+
+        self.fit_history.append(float(np.mean(results)))
+
+        console.rule(f"Generation {self.current_gen}/{self.config.num_steps}")
+        console.log(f"Best:  {np.min(results):.3f}")
+        console.log(f"Mean:  {np.mean(results):.3f}")
+        console.log(f"N={len(for_eval)} | took {eval_time:.1f}s")
         self.current_gen += 1
 
-        return population
+        return Population(non_eval + for_eval)
 
 
-@ray.remote(num_cpus=1)
-def evaluate_pair_worker(
-    robot_graph,
-    spawn_pos: tuple[float, float, float],
-    target_pos: tuple[float, float, float],
-    )-> float:
-    """
-    Remote worker that constructs a body and evaluates it with a hivemind.
-    Accepts nde_model explicitly to avoid global variable dependency.
-    """
-
-    robot_spec = construct_mjspec_from_graph(robot_graph).spec
-
-    # 2. Simulation Setup (Logic from evaluate_single)
-    mj.set_mjcb_control(None)
-    world = SimpleFlatWorld()
-    world.spawn(
-        robot_spec,
-        position=spawn_pos,
-        correct_collision_with_floor=True,
-    )
-
-    model = world.spec.compile()
-    data = mj.MjData(model)  # type:ignore
-
-    input_size = len(get_robot_state(data, target_position=target_pos))
-    # print(input_size)
-    output_size = model.nu  # type:ignore
-
-    if model.nu < 2: # type:ignore
-        # return bad fitness if robot kinda cannot move
-        # made to be adaptabel to different target positions
-        # return target_pos[0]
-        return float(np.linalg.norm(np.array(target_pos) - np.array(spawn_pos)))
-
-
-    lr_pop_size = 10 
-    generations = 10
-
-    min_fit = np.inf
-
-    net = Network(input_size=input_size, hidden_size=16, output_size=output_size)
-    num_vars = sum(p.numel() for p in net.parameters())
-
-    local_learner = ng.optimizers.CMA(
-        parametrization = num_vars,
-        budget = lr_pop_size * generations,
-    )
-
-    tracker = Tracker(name_to_bind="core", observable_attributes=["xpos"], quiet=True)
-    tracker.setup(world.spec, data)
-
-    controller = Controller(controller_callback_function=net.forward, tracker=tracker)
-    for _ in range(generations):
-        vecs = [local_learner.ask() for _ in range(lr_pop_size)]
-
-        for vec_candidate in vecs:
-            # 3. Network Construction
-            fill_parameters(net, vec_candidate.value)
-
-            mj.mj_resetData(model, data)  # type:ignore
-            # Compensate for "flop"
-            simple_runner(model, data, duration=3) # type:ignore
-            displacement = data.qpos[0:3].copy()
-
-            # Add "flop" displacement to target so needed distance stays the same.
-            # Should not be used with olympic arena for now...
-            (xt, yt, zt) = np.array(target_pos)  + displacement
-
-            mj.set_mjcb_control(lambda m, d: controller.set_control(m, d, target_position=(xt, yt, zt)))
-            # 4. Run Simulation
-            simple_runner(model, data, duration=10)  # type: ignore
-
-            # 5. Calculate Fitness
-            xc, yc, zc = data.qpos[0:3].copy()
-            fitness = np.sqrt((xt - xc) ** 2 + (yt - yc) ** 2 + (zt - zc) ** 2)
-
-            local_learner.tell(vec_candidate, fitness)
-
-            min_fit = min(min_fit, fitness)
-
-    return min_fit
-# ------------------------------------------------------------------------ #
-#                           Helper Functions                               #
-# ------------------------------------------------------------------------ #
-
-# Currently Completed
-def simple_runner(
-    model: mj.MjModel,
-    data: mj.MjData,
-    duration: float = 10.0,
-    steps_per_loop: int = 100,
+def _print_summary(
+    population: Population,
+    total_time: float,
+    db_name: str,
+    gens: int,
 ) -> None:
-    """
-    Run a simple headless simulation for a given duration, 
-    *without resetting the simulation.
+    console.rule("[bold green]Evolution Complete")
+    table = Table(title="Final Statistics", show_header=True)
+    table.add_column("Metric", style="cyan", no_wrap=True)
+    table.add_column("Value", style="green")
 
-    Parameters
-    ----------
-    model : mujoco.MjModel
-        The MuJoCo model to simulate.
-    data : mujoco.MjData
-        The MuJoCo data to simulate.
-    duration : float, optional
-        The duration of the simulation in seconds, by default 10.0
-    steps_per_loop : int, optional
-        The number of simulation steps to take in each loop, by default 100
-    """
-
-    # Define action specification and set policy
-    data.ctrl = RNG.normal(scale=0.1, size=model.nu)  # type: ignore
-
-    while data.time < duration:
-        mj.mj_step(model, data, nstep=steps_per_loop)
-
-# ------------------------------------------------------------------------ #
-#                        Main Evolution Loop                               #
-# ------------------------------------------------------------------------ #
-
-def evolve() -> EA:
-
-    console.log("Initializing population...")
-    hivemind_EA = Evo(pop_size=POP_SIZE)
-    
-    # Initialise Body & Hivemind Population
-    population = [create_individual(GENE_SIZE) for _ in range(POP_SIZE)]
-
-    # Initial Eval
-    population = hivemind_EA.evaluate_pop(population)
-
-    # Define Evolution Loop
-    # Operators work for both NDEs and Network Weight Vectors 
-    ops = [    
-        # Default EA operators
-        EAStep("parent_selection", hivemind_EA.parent_selection),
-        EAStep("crossover", hivemind_EA.crossover),
-        EAStep("mutation", hivemind_EA.mutation),
-        EAStep("evaluation", hivemind_EA.evaluate_pop),
-        EAStep("survivor_selection", hivemind_EA.survivor_selection),
+    fitnesses = [
+        ind.fitness_
+        for ind in population
+        if hasattr(ind, "fitness_") and ind.fitness_ is not None
     ]
+    if fitnesses:
+        table.add_row("Best Fitness", f"{min(fitnesses):.6f}")
+        table.add_row("Mean Fitness", f"{float(np.mean(fitnesses)):.6f}")
+        table.add_row("Worst Fitness", f"{max(fitnesses):.6f}")
+        table.add_row("Std Fitness", f"{float(np.std(fitnesses)):.6f}")
 
-    # Initialise EA object
-    ea = EA(population, 
-            operations=ops,
-            num_of_generations=NUM_GENERATIONS
-                )
-    
-    ea.run()
+    table.add_row("Total Time", str(timedelta(seconds=int(total_time))))
+    if gens > 0:
+        table.add_row("Time per Generation", f"{total_time / gens:.1f}s")
+    table.add_row("Database", db_name)
+    console.print(table)
 
-    return ea
 
-def main():
+@app.command()
+def evolve(
+    pop_size: Annotated[
+        int,
+        typer.Option("--pop-size", "-p", help="Population size", min=2),
+    ] = DEFAULT_POP_SIZE,
+    generations: Annotated[
+        int,
+        typer.Option("--generations", "-g", help="Generations", min=1),
+    ] = DEFAULT_NUM_GENERATIONS,
+    num_modules: Annotated[
+        int,
+        typer.Option("--modules", "-m", help="Max body modules", min=1),
+    ] = DEFAULT_NUM_MODULES,
+    gene_size: Annotated[
+        int,
+        typer.Option("--gene-size", help="Genotype size per layer", min=1),
+    ] = DEFAULT_GENE_SIZE,
+    cma_generations: Annotated[
+        int,
+        typer.Option("--cma-gen", help="CMA-ES generations per eval", min=1),
+    ] = DEFAULT_CMA_GENERATIONS,
+    cma_pop_size: Annotated[
+        int,
+        typer.Option("--cma-pop", help="CMA-ES population", min=2),
+    ] = DEFAULT_CMA_POP_SIZE,
+    seed: Annotated[
+        int | None,
+        typer.Option("--seed", "-s", help="Random seed"),
+    ] = None,
+    output_dir: Annotated[
+        Path,
+        typer.Option("--output", "-o", help="Output directory"),
+    ] = Path("__data__"),
+) -> None:
+    """Run body-brain co-evolution with J.E.S.U.S. stagnation recovery."""
+    data_dir = Path.cwd() / output_dir / "RE_JESUS"
+    data_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialize Ray. ignore_reinit_error=True helps if you run this in a notebook/loop
-    ray.init(ignore_reinit_error=True,
-             num_cpus=6, # Set this to the number of cores you want to use for parallel evaluation
-             )
+    config = EvolutionConfig(
+        pop_size=pop_size,
+        num_generations=generations,
+        num_modules=num_modules,
+        gene_size=gene_size,
+        cma_generations=cma_generations,
+        cma_pop_size=cma_pop_size,
+        data_dir=data_dir,
+        seed=seed,
+    )
 
-    _ = evolve()
-    # torch.save(best_hivemind.genotype, Path("__data__/best_hivemind_data.pth"))
-    ray.shutdown()
-    
+    db_name = f"database_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+    ea_settings = EASettings(
+        output_folder=data_dir,
+        db_file_name=db_name,
+        is_maximisation=False,
+        num_steps=generations,
+        db_handling="delete",
+        target_population_size=pop_size,
+    )
+
+    console.rule("[bold blue]RE_JESUS — Body-Brain Evolution with J.E.S.U.S.")
+    console.print(f"Data directory: [green]{data_dir}[/]")
+    console.print(f"Population size: [yellow]{pop_size}[/]")
+    console.print(f"Generations: [yellow]{generations}[/]")
+    console.print(f"Parallel workers: [yellow]{NUM_WORKERS}[/]")
+    console.print(
+        f"CMA-ES config: [yellow]{cma_generations} gen × {cma_pop_size} pop[/]"
+    )
+    console.print(f"Random seed: [yellow]{seed or 'Random'}[/]")
+    console.print(f"Database: [green]{db_name}[/]")
+    console.print()
+
+    start_time = time.perf_counter()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(complete_style="green", finished_style="green"),
+        TaskProgressColumn(),
+        TimeRemainingColumn(elapsed_when_finished=True),
+        TimeElapsedColumn(),
+        MofNCompleteColumn(),
+        console=console,
+        transient=False,
+    ) as progress:
+        evo = Evo(config=config, ea_settings=ea_settings)
+
+        init_task = progress.add_task(
+            "[green]Initializing population...", total=pop_size
+        )
+        population = Population([])
+        for _ in range(pop_size):
+            population.append(create_individual(gene_size))
+            progress.advance(init_task)
+        progress.remove_task(init_task)
+
+        population = evo.evaluate_pop(population)
+
+        ops = [
+            EAOperation(evo.parent_selection),
+            EAOperation(evo.crossover),
+            EAOperation(evo.mutation),
+            EAOperation(evo.evaluate_pop),
+            EAOperation(evo.survivor_selection),
+        ]
+
+        ea = EA(population, operations=ops, num_steps=generations)
+
+        try:
+            ea.run()
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Evolution interrupted by user[/]")
+            raise typer.Exit(code=1)
+
+        final_population = ea.population
+
+    total_time = time.perf_counter() - start_time
+    _print_summary(final_population, total_time, db_name, evo.current_gen)
+
+
+@app.command()
+def status(
+    data_dir: Annotated[
+        Path,
+        typer.Argument(help="Path to __data__ directory"),
+    ] = Path("__data__/RE_JESUS"),
+) -> None:
+    """Check status of existing evolution runs."""
+    data_dir = Path.cwd() / data_dir
+    if not data_dir.exists():
+        console.print(f"[red]Directory not found:[/] {data_dir}")
+        return
+
+    db_files = list(data_dir.glob("*.db"))
+    nde_files = list(data_dir.glob("*.pth"))
+
+    table = Table(title=f"Evolution Status: {data_dir}")
+    table.add_column("File Type", style="cyan")
+    table.add_column("Count", style="green")
+    table.add_column("Latest", style="yellow")
+
+    table.add_row(
+        "Databases",
+        str(len(db_files)),
+        max([f.name for f in db_files] or ["N/A"]),
+    )
+    table.add_row(
+        "NDE Checkpoints",
+        str(len(nde_files)),
+        max([f.name for f in nde_files] or ["N/A"]),
+    )
+    console.print(table)
+
+
 if __name__ == "__main__":
-   
-    start = time.time()
-
-    main()
-    
-    end = time.time()
-
-    time_taken = end-start
-
-    # Literally just to see the results better while testing
-    if time_taken < 60:
-        print(f"Code took {time_taken:.3f} seconds to run") 
-    elif time_taken < 60*60:
-        print(f"Code took {time_taken/60:.3f} minutes to run") 
-    else:
-        print(f"Code took {time_taken/(60*60):.3f} hours to run") 
+    app()

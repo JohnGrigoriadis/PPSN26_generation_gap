@@ -1,20 +1,33 @@
-"""Evolutionary Robotics runner with parallel evaluation.
+"""Parallel body-brain co-evolution with a CLI interface.
 
-Uses ariel's EA / EAStep abstraction (like RE_sync.py) but parallelises
-robot evaluation through multiprocessing + mujoco_worker.evaluate_individual
-(batch size 8).
+Mirrors RE_sync.py but exposes all hyper-parameters as command-line arguments
+via Typer and tracks evaluation progress with a Rich progress bar.
 """
 
 import time
 from datetime import datetime, timedelta
-from multiprocessing import get_context
 from pathlib import Path
 from typing import Annotated, Any
 
 import numpy as np
 import torch
 import typer
-from mujoco_worker_1 import EvalConfig, evaluate_individual
+from ariel.body_phenotypes.robogen_lite.constructor import (
+    construct_mjspec_from_graph,
+)
+from ariel.body_phenotypes.robogen_lite.decoders.hi_prob_decoding import (
+    HighProbabilityDecoder,
+)
+from ariel.ec import (
+    EA,
+    Crossover,
+    EAOperation,
+    EASettings,
+    Individual,
+    Population,
+)
+from ariel.ec.genotypes.nde import NeuralDevelopmentalEncoding
+from ariel.simulation.environments import SimpleFlatWorld
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -27,20 +40,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 from rich.table import Table
-
-# Local project imports
-from ariel.body_phenotypes.robogen_lite.constructor import (
-    construct_mjspec_from_graph,
-)
-from ariel.body_phenotypes.robogen_lite.decoders.hi_prob_decoding import (
-    HighProbabilityDecoder,
-)
-from ariel.ec.a001 import Individual
-import ariel.ec.a004 as _ariel_ec
-from ariel.ec.a004 import EA, EASettings, EAStep, Population
-from ariel.ec.a005 import Crossover
-from ariel.ec.genotypes.nde import NeuralDevelopmentalEncoding
-from ariel.simulation.environments import SimpleFlatWorld
+from robot_worker import LocomotionConfig, run_pool
 
 console = Console()
 
@@ -60,6 +60,7 @@ DEFAULT_CMA_POP_SIZE: int = 5
 NUM_WORKERS: int = 8
 
 CWD = Path.cwd()
+
 
 class EvolutionConfig:
     def __init__(
@@ -104,13 +105,14 @@ class Evo:
             genotype_size=config.gene_size,
         )
         self.hpd = HighProbabilityDecoder(num_modules=config.num_modules)
-
         torch.save(self.nde.state_dict(), config.data_dir / "NDE.pth")
 
     def create_individual(self) -> Individual:
         ind = Individual()
         ind.genotype = self.config.rng.normal(
-            loc=0, scale=64, size=(3, self.config.gene_size)
+            loc=0,
+            scale=64,
+            size=(3, self.config.gene_size),
         ).tolist()
         return ind
 
@@ -118,22 +120,24 @@ class Evo:
         genotype_tensor = torch.tensor(genotype, dtype=torch.float32)
         p_matrices = self.nde.forward(genotype_tensor)
         return self.hpd.probability_matrices_to_graph(
-            p_matrices[0], p_matrices[1], p_matrices[2]
+            p_matrices[0],
+            p_matrices[1],
+            p_matrices[2],
         )
 
     # ------------------------------------------------------------------ #
     #                         EA Operators                               #
     # ------------------------------------------------------------------ #
+
     def parent_selection(self, population: Population) -> Population:
         tournament_size = 3
         for ind in population:
             ind.tags["ps"] = False
 
         num_parents = (len(population) // 2) + 1
-
         for _ in range(num_parents):
             competitors = [
-                population[self.config.rng.integers(len(population))]
+                list(population)[self.config.rng.integers(len(population))]
                 for _ in range(tournament_size)
             ]
             winner = min(competitors, key=lambda ind: ind.fitness)
@@ -176,10 +180,11 @@ class Evo:
             if ind.tags.get("mut", False):
                 genes = np.array(ind.genotype).flatten()
                 noise = self.config.rng.normal(
-                    loc=0.0, scale=mutation_strength * pop_std, size=genes.shape
+                    loc=0.0,
+                    scale=mutation_strength * pop_std,
+                    size=genes.shape,
                 )
-                mutated = genes + noise
-                ind.genotype = mutated.reshape((3, -1)).tolist()
+                ind.genotype = (genes + noise).reshape((3, -1)).tolist()
                 ind.tags["mut"] = False
         return population
 
@@ -201,14 +206,10 @@ class Evo:
                 alive[self.config.rng.integers(len(alive))]
                 for _ in range(min(tournament_size, len(alive)))
             ]
-            to_kill = max(candidates, key=lambda ind: ind.fitness)
-            to_kill.alive = False
+            max(candidates, key=lambda ind: ind.fitness).alive = False
 
         return population
 
-    # ------------------------------------------------------------------ #
-    #                    Parallel Evaluation                             #
-    # ------------------------------------------------------------------ #
     def evaluate_pop(self, population: Population) -> Population:
         for_eval = [ind for ind in population if ind.requires_eval]
         if not for_eval:
@@ -229,7 +230,7 @@ class Evo:
             xml_string = world.spec.to_xml()
 
             worker_seed = (self.config.seed or 0) + self.current_gen * 10000 + i
-            eval_config = EvalConfig(
+            eval_config = LocomotionConfig(
                 cma_generations=self.config.cma_generations,
                 cma_pop_size=self.config.cma_pop_size,
                 spawn_position=self.spawn_position,
@@ -244,16 +245,10 @@ class Evo:
         )
 
         eval_start = time.time()
-        ctx = get_context("spawn")
-        results: list[float] = []
-        with ctx.Pool(processes=NUM_WORKERS) as pool:
-            for fitness in pool.imap(
-                evaluate_individual, eval_args, chunksize=1
-            ):
-                results.append(fitness)
-                self.progress.advance(eval_task)
+        results = run_pool(eval_args, num_workers=NUM_WORKERS)
         eval_time = time.time() - eval_start
 
+        self.progress.update(eval_task, completed=len(for_eval))
         self.progress.remove_task(eval_task)
 
         for ind, fitness in zip(for_eval, results, strict=True):
@@ -261,30 +256,24 @@ class Evo:
             ind.requires_eval = False
 
         console.rule(
-            f"Generation {self.current_gen}/{self.ea_settings.num_of_generations}"
+            f"Generation {self.current_gen}/{self.ea_settings.num_steps}"
         )
         console.print(
             f"Best: [green]{min(results):.3f}[/] | "
             f"Mean: [blue]{float(np.mean(results)):.3f}[/] | "
             f"Worst: [red]{max(results):.3f}[/] | "
-            f"N={len(results)} | took {eval_time:.1f}s"
+            f"N={len(results)} | took {eval_time:.1f}s",
         )
         self.current_gen += 1
 
         return population
 
 
-def _generate_unique_db_name(data_dir: Path, base_name: str = "database") -> str:
-    counter = 0
-    db_name = f"{base_name}.db"
-    while (data_dir / db_name).exists():
-        counter += 1
-        db_name = f"{base_name}_{counter}.db"
-    return db_name
-
-
 def _print_summary(
-    population: Population, total_time: float, db_name: str, gens: int
+    population: Population,
+    total_time: float,
+    db_name: str,
+    gens: int,
 ) -> None:
     console.rule("[bold green]Evolution Complete")
     table = Table(title="Final Statistics", show_header=True)
@@ -292,7 +281,7 @@ def _print_summary(
     table.add_column("Value", style="green")
 
     fitnesses = [
-        ind.fitness
+        ind.fitness_
         for ind in population
         if hasattr(ind, "fitness_") and ind.fitness_ is not None
     ]
@@ -312,34 +301,40 @@ def _print_summary(
 @app.command()
 def evolve(
     pop_size: Annotated[
-        int, typer.Option("--pop-size", "-p", help="Population size", min=2)
+        int,
+        typer.Option("--pop-size", "-p", help="Population size", min=2),
     ] = DEFAULT_POP_SIZE,
     generations: Annotated[
-        int, typer.Option("--generations", "-g", help="Generations", min=1)
+        int,
+        typer.Option("--generations", "-g", help="Generations", min=1),
     ] = DEFAULT_NUM_GENERATIONS,
     num_modules: Annotated[
-        int, typer.Option("--modules", "-m", help="Max body modules", min=1)
+        int,
+        typer.Option("--modules", "-m", help="Max body modules", min=1),
     ] = DEFAULT_NUM_MODULES,
     gene_size: Annotated[
-        int, typer.Option("--gene-size", help="Genotype size per layer", min=1)
+        int,
+        typer.Option("--gene-size", help="Genotype size per layer", min=1),
     ] = DEFAULT_GENE_SIZE,
     cma_generations: Annotated[
         int,
         typer.Option("--cma-gen", help="CMA-ES generations per eval", min=1),
     ] = DEFAULT_CMA_GENERATIONS,
     cma_pop_size: Annotated[
-        int, typer.Option("--cma-pop", help="CMA-ES population", min=2)
+        int,
+        typer.Option("--cma-pop", help="CMA-ES population", min=2),
     ] = DEFAULT_CMA_POP_SIZE,
     seed: Annotated[
-        int | None, typer.Option("--seed", "-s", help="Random seed")
+        int | None,
+        typer.Option("--seed", "-s", help="Random seed"),
     ] = None,
     output_dir: Annotated[
-        Path, typer.Option("--output", "-o", help="Output directory")
+        Path,
+        typer.Option("--output", "-o", help="Output directory"),
     ] = Path("__data__"),
 ) -> None:
-    """Run evolutionary robotics optimization with parallel evaluation."""
-    script_name = "ariel_evolution"
-    data_dir = Path.cwd() / output_dir / script_name
+    """Run evolutionary robotics optimisation with parallel evaluation."""
+    data_dir = Path.cwd() / output_dir / "ariel_evolution"
     data_dir.mkdir(parents=True, exist_ok=True)
 
     config = EvolutionConfig(
@@ -357,15 +352,11 @@ def evolve(
     ea_settings = EASettings(
         output_folder=data_dir,
         db_file_name=db_name,
-        db_file_path=data_dir / db_name,  # must be explicit; EASettings computes its default at class definition time
         is_maximisation=False,
-        num_of_generations=generations,
+        num_steps=generations,
         db_handling="halt",
         target_population_size=pop_size,
     )
-    # EA.init_database() reads the module-level config, not the instance we pass in,
-    # so we patch it here before constructing EA.
-    _ariel_ec.config = ea_settings
 
     console.rule("[bold blue]Ariel Evolutionary Robotics Framework")
     console.print(f"Data directory: [green]{data_dir}[/]")
@@ -394,32 +385,29 @@ def evolve(
     ) as progress:
         evo = Evo(config=config, ea_settings=ea_settings, progress=progress)
 
-        # Initial population
         init_task = progress.add_task(
             "[green]Initializing population...", total=pop_size
         )
-        population: Population = []
+        population = Population([])
         for _ in range(pop_size):
             population.append(evo.create_individual())
             progress.advance(init_task)
         progress.remove_task(init_task)
 
-        # Initial evaluation
         population = evo.evaluate_pop(population)
 
-        # EA operations (mirrors RE_sync.evolve)
         ops = [
-            EAStep("parent_selection", evo.parent_selection),
-            EAStep("crossover", evo.crossover),
-            EAStep("mutation", evo.mutation),
-            EAStep("evaluation", evo.evaluate_pop),
-            EAStep("survivor_selection", evo.survivor_selection),
+            EAOperation(evo.parent_selection),
+            EAOperation(evo.crossover),
+            EAOperation(evo.mutation),
+            EAOperation(evo.evaluate_pop),
+            EAOperation(evo.survivor_selection),
         ]
 
         ea = EA(
             population,
             operations=ops,
-            num_of_generations=generations,
+            num_steps=generations,
         )
 
         try:
@@ -428,7 +416,6 @@ def evolve(
             console.print("\n[yellow]Evolution interrupted by user[/]")
             raise typer.Exit(code=1)
 
-        ea.fetch_population(only_alive=False)
         final_population = ea.population
 
     total_time = time.perf_counter() - start_time
@@ -438,12 +425,12 @@ def evolve(
 @app.command()
 def status(
     data_dir: Annotated[
-        Path, typer.Argument(help="Path to __data__ directory")
+        Path,
+        typer.Argument(help="Path to __data__ directory"),
     ] = Path("__data__/ariel_evolution"),
 ) -> None:
     """Check status of existing evolution runs."""
-    cwd = Path.cwd()
-    data_dir = cwd / data_dir
+    data_dir = Path.cwd() / data_dir
     if not data_dir.exists():
         console.print(f"[red]Directory not found:[/] {data_dir}")
         return
