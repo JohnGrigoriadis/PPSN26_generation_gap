@@ -53,8 +53,8 @@ Output is written to `__data__/<experiment>/` as a SQLite database that can be e
 
 - Python ≥ 3.12
 - [MuJoCo](https://mujoco.org/) ≥ 3.3.6
-- [ariel](ariel/) — included as a git submodule
-- All other Python packages are listed in `pyproject.toml`
+- [ariel](https://github.com/ci-group/ariel) — included as a git submodule
+- All other Python packages are listed in `pyproject.toml` of ariel
 
 ---
 
