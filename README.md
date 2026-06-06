@@ -35,10 +35,12 @@ All three share the same evaluation stack (`robot_worker.py`): a CMA-ES loop tha
 ## Repository Structure
 
 ```
-PPSN_experiment/
+PPSN26_generation_gap/
 ├── RE_sync.py                  # Baseline experiment 
 ├── RE_async.py                 # Asynchronous experiment 
 ├── RE_JESUS.py                 # Archive experiment
+├── Ackley.ipynb                # ARIEL Ackley function experiment
+├── N_Queens                    # ARIEL N-Queens experiment
 ├── robot_worker.py             # Shared MuJoCo evaluation worker
 ├── view_results_from_db.ipynb  # Results visualisation
 ├── ariel/                      # EA framework (git submodule)
@@ -63,7 +65,7 @@ Output is written to `__data__/<experiment>/` as a SQLite database that can be e
 ```bash
 # Clone with submodules
 git clone --recurse-submodules <repo-url>
-cd PPSN_experiment
+cd PPSN26_generation_gap
 
 # Install Python dependencies
 uv sync
