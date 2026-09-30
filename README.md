@@ -10,7 +10,7 @@
 <!-- ## Abstract -->
 <h2 align="center">Abstract</h2>
 
-<p style="text-align: center;">Evolutionary computation has produced many successful al gorithms and tools. The main challenge in flexible evolutionary computation lies not only in varying  and selecting individuals, but also in how they are represented, stored, scheduled, and retrieved over time. This paper introduces ARIEL, a framework that shifts evolutionary computation from a generation focus to persistent, stateful individuals. We present three configurations: (1) synchronous, (2) archive-assisted, and (3) asynchronous. The experiments show that population management can support different evolutionary  workflows without changes to the underlying engine or operators. These workflows  can all be achieved within the same infrastructure by adjusting eligibility conditions and orchestra tion logic.</p>
+<p style="text-align: centre;">Evolutionary computation has produced many successful algorithms and tools. The main challenge in flexible evolutionary computation lies not only in varying  and selecting individuals, but also in how they are represented, stored, scheduled, and retrieved over time. This paper introduces ARIEL, a framework that shifts evolutionary computation from a generation focus to persistent, stateful individuals. We present three configurations: (1) synchronous, (2) archive-assisted, and (3) asynchronous. The experiments show that population management can support different evolutionary  workflows without changes to the underlying engine or operators. These workflows  can all be achieved within the same infrastructure by adjusting eligibility conditions and orchestration logic.</p>
 
 
 
@@ -24,9 +24,9 @@ Three experimental variants are provided:
 
 | Script | Description |
 |---|---|
-| `RE_sync.py` | Baseline — synchronous Body-Brain Evolution |
+| `RE_sync.py` | Baseline - synchronous Body-Brain Evolution |
 | `RE_async.py` | Asynchronous |
-| `RE_JESUS.py` | Archive — detects stagnation and injects historically successful individuals from the archive. Comically named J.E.S.U.S. (Joint Evolutionary Strategies with Undead Sampling) during development |
+| `RE_JESUS.py` | Archive - detects stagnation and injects historically successful individuals from the archive. Comically named J.E.S.U.S. (Joint Evolutionary Strategies with Undead Sampling) during development |
 
 All three share the same evaluation stack (`robot_worker.py`): a CMA-ES loop that optimises an ANN controller per robot and returns the minimum distance to target achieved.
 
@@ -55,7 +55,7 @@ Output is written to `__data__/<experiment>/` as a SQLite database that can be e
 
 - Python ≥ 3.12
 - [MuJoCo](https://mujoco.org/) ≥ 3.3.6
-- [ariel](https://github.com/ci-group/ariel) — included as a git submodule
+- [ariel](https://github.com/ci-group/ariel) - included as a git submodule
 - All other Python packages are listed in `pyproject.toml` of ariel
 
 ---
@@ -128,14 +128,17 @@ Open `view_results_from_db.ipynb` in Jupyter and point it at the `.db` file prod
 
 ## Citation
 
-Will be added once the paper is published
-
-If you use this code please cite:
-
 ```bibtex
-[INSERT CITATION HERE]
-
-YES I LEFT THIS HERE UNTIL THE ACTUAL CITATION AS AS JOKE
-
-HI
+@InProceedings{10.1007/978-3-032-36226-1_36,
+   author="Grigoriadis, Ioannis and Schwarzenbach, Lilly and Ferencz, {\'A}ron Rich{\'a}rd and di Matteo, Jacopo Michele",
+   editor="Iacca, Giovanni and Nadizar, Giorgia and Yaman, Anil and Bucur, Doina and Della Cioppa, Antonio and Hu, Ting and Medvet, Eric and Thomson, Sarah L.",
+   title="The Generation Gap: What Using Generations Misses",
+   booktitle="Parallel Problem Solving from Nature -- PPSN XIX",
+   year="2027",
+   publisher="Springer Nature Switzerland",
+   address="Cham",
+   pages="589--603",
+   abstract="Evolutionary computation has produced many successful algorithms and tools. The main challenge in evolutionary computation lies not only in varying and selecting individuals but also in how they are represented, stored, scheduled, and retrieved over time. This paper introduces ARIEL, a framework that shifts evolutionary computation from focusing on generations to persistent, stateful individuals. We present three configurations: (1) synchronous, (2) archive-assisted, and (3) asynchronous. The experiments show that ARIEL's population management can support different evolutionary workflows without changes to the underlying engine or operators. These workflows can all be achieved within the same infrastructure by adjusting eligibility conditions and orchestration logic.",
+isbn="978-3-032-36226-1"
+}
 ```
